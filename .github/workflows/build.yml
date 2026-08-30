@@ -1,204 +1,24 @@
-name: 🚀 Build Website + PWA + APK
-
-on:
-  push:
-    paths:
-      - "*.zip"
-      - ".github/workflows/build.yml"
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
-jobs:
-  prepare:
-    name: 📦 تجهيز اللعبة
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: البحث عن ملف ZIP
-        id: zip
-        run: |
-          ZIP=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
-
-          if [ -z "$ZIP" ]; then
-            echo "❌ لم يتم العثور على ملف ZIP"
-            exit 1
-          fi
-
-          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
-
-      - name: فك اللعبة
-        run: |
-          rm -rf dist /tmp/game
-          mkdir -p dist /tmp/game
-
-          unzip -o "${{ steps.zip.outputs.zip }}" -d /tmp/game
-
-          if [ -f /tmp/game/index.html ]; then
-            cp -R /tmp/game/. dist/
-          else
-            FOLDER=$(find /tmp/game -mindepth 1 -maxdepth 1 -type d | head -n 1)
-
-            if [ -f "$FOLDER/index.html" ]; then
-              cp -R "$FOLDER"/. dist/
-            else
-              echo "❌ يجب أن يحتوي ZIP على index.html"
-              exit 1
-            fi
-          fi
-
-          test -f dist/index.html
-
-      - name: إضافة manifest للـPWA إذا لم يكن موجودًا
-        run: |
-          if [ ! -f dist/manifest.json ]; then
-            cat > dist/manifest.json <<'EOF'
-          {
-            "name": "حطّمها",
-            "short_name": "حطّمها",
-            "description": "لعبة حطّمها",
-            "lang": "ar",
-            "dir": "rtl",
-            "start_url": "./",
-            "scope": "./",
-            "display": "standalone",
-            "orientation": "portrait",
-            "background_color": "#080b1a",
-            "theme_color": "#ff4d72"
-          }
-          EOF
-          fi
-
-      - name: إضافة Service Worker
-        run: |
-          if [ ! -f dist/service-worker.js ]; then
-            cat > dist/service-worker.js <<'EOF'
-          const CACHE_NAME = "hatemha-v1";
-
-          const FILES = [
-            "./",
-            "./index.html",
-            "./manifest.json"
-          ];
-
-          self.addEventListener("install", event => {
-            event.waitUntil(
-              caches.open(CACHE_NAME)
-                .then(cache => cache.addAll(FILES))
-                .then(() => self.skipWaiting())
-            );
-          });
-
-          self.addEventListener("activate", event => {
-            event.waitUntil(self.clients.claim());
-          });
-
-          self.addEventListener("fetch", event => {
-            if (event.request.method !== "GET") return;
-
-            event.respondWith(
-              caches.match(event.request)
-                .then(cached => cached || fetch(event.request))
-            );
-          });
-          EOF
-          fi
-
-      - name: تسجيل Service Worker
-        run: |
-          if ! grep -q "serviceWorker.register" dist/index.html; then
-            python3 <<'PY'
-          from pathlib import Path
-
-          file = Path("dist/index.html")
-
-          html = file.read_text(
-              encoding="utf-8",
-              errors="ignore"
-          )
-
-          script = '''
-          <script>
-          if ("serviceWorker" in navigator) {
-            window.addEventListener("load", () => {
-              navigator.serviceWorker.register("./service-worker.js");
-            });
-          }
-          </script>
-          '''
-
-          if "</body>" in html:
-              html = html.replace("</body>", script + "</body>")
-          else:
-              html += script
-
-          file.write_text(html, encoding="utf-8")
-          PY
-          fi
-
-      - name: رفع ملفات الموقع
-        uses: actions/upload-artifact@v4
-        with:
-          name: website
-          path: dist
-
-  deploy:
-    name: 🌐 نشر الموقع
-    needs: prepare
-    runs-on: ubuntu-latest
-
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: تحميل الموقع
-        uses: actions/download-artifact@v4
-        with:
-          name: website
-          path: dist
-
-      - name: تجهيز GitHub Pages
-        uses: actions/configure-pages@v5
-
-      - name: رفع الموقع
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-
-      - name: نشر الموقع
-        id: deployment
-        uses: actions/deploy-pages@v4
-
   apk:
     name: 📱 بناء APK
     needs: deploy
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: تثبيت Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
 
-      - name: تثبيت Bubblewrap
-        run: |
-          npm install -g @bubblewrap/cli
+      - name: تثبيت Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
 
-      - name: إنشاء رابط GitHub Pages
+      - name: تثبيت Bubblewrap
+        run: npm install -g @bubblewrap/cli
+
+      - name: إنشاء رابط الموقع
         id: site
         run: |
           OWNER="${GITHUB_REPOSITORY_OWNER}"
@@ -206,24 +26,46 @@ jobs:
 
           echo "url=https://${OWNER}.github.io/${REPO}/" >> "$GITHUB_OUTPUT"
 
-      - name: إنشاء تطبيق Android
+      - name: إنشاء مشروع Android
         run: |
-          mkdir twa
+          mkdir -p twa
           cd twa
 
           bubblewrap init \
-            --manifest "${{ steps.site.outputs.url }}manifest.json" \
-            --directory . \
+            --manifest="${{ steps.site.outputs.url }}manifest.json" \
+            --directory="." \
             --yes
 
-      - name: بناء APK
+      - name: تجهيز Android SDK
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: فحص Bubblewrap
+        working-directory: twa
+        run: bubblewrap doctor
+
+      - name: بناء APK بدون توقيع تفاعلي
         working-directory: twa
         run: |
-          bubblewrap build --skipPwaValidation
+          bubblewrap build \
+            --skipPwaValidation \
+            --skipSigning
 
-      - name: حفظ APK
+      - name: البحث عن APK
+        working-directory: twa
+        run: |
+          find . -name "*.apk" -type f -print
+
+      - name: رفع APK
         uses: actions/upload-artifact@v4
         with:
           name: حطّمها-APK
-          path: twa/app-release-signed.apk
+          path: |
+            twa/app-release-unsigned-aligned.apk
+            twa/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
