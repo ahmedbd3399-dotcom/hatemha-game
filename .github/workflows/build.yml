@@ -1,24 +1,192 @@
+name: 🚀 حطّمها - Website + PWA + APK
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "*.zip"
+      - ".github/workflows/build.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+
+  prepare:
+    name: 📦 تجهيز اللعبة
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: تحميل الملفات
+        uses: actions/checkout@v4
+
+      - name: البحث عن game.zip
+        run: |
+          if [ ! -f "game.zip" ]; then
+            echo "❌ ملف game.zip غير موجود"
+            exit 1
+          fi
+
+      - name: فك اللعبة
+        run: |
+          rm -rf dist extracted
+          mkdir -p dist extracted
+
+          unzip -o game.zip -d extracted
+
+          if [ -f "extracted/index.html" ]; then
+            cp -R extracted/. dist/
+          else
+            FOLDER=$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n 1)
+
+            if [ -n "$FOLDER" ] && [ -f "$FOLDER/index.html" ]; then
+              cp -R "$FOLDER"/. dist/
+            else
+              echo "❌ لم يتم العثور على index.html داخل game.zip"
+              exit 1
+            fi
+          fi
+
+          echo "✅ تم تجهيز اللعبة"
+          ls -la dist
+
+      - name: إنشاء manifest إذا لم يكن موجودًا
+        run: |
+          if [ ! -f "dist/manifest.json" ]; then
+
+            cat > dist/manifest.json <<'EOF'
+          {
+            "name": "حطّمها",
+            "short_name": "حطّمها",
+            "description": "حطّمها - لعبة أحمد",
+            "start_url": "./",
+            "scope": "./",
+            "display": "standalone",
+            "orientation": "portrait",
+            "background_color": "#f3f5f8",
+            "theme_color": "#20242c",
+            "lang": "ar",
+            "dir": "rtl"
+          }
+          EOF
+
+          fi
+
+      - name: إنشاء Service Worker إذا لم يكن موجودًا
+        run: |
+          if [ ! -f "dist/service-worker.js" ]; then
+
+            cat > dist/service-worker.js <<'EOF'
+          const CACHE_NAME = "hatemha-v3";
+
+          const FILES = [
+            "./",
+            "./index.html",
+            "./manifest.json"
+          ];
+
+          self.addEventListener("install", event => {
+            event.waitUntil(
+              caches.open(CACHE_NAME)
+                .then(cache => cache.addAll(FILES))
+                .then(() => self.skipWaiting())
+            );
+          });
+
+          self.addEventListener("activate", event => {
+            event.waitUntil(
+              caches.keys().then(keys =>
+                Promise.all(
+                  keys
+                    .filter(key => key !== CACHE_NAME)
+                    .map(key => caches.delete(key))
+                )
+              ).then(() => self.clients.claim())
+            );
+          });
+
+          self.addEventListener("fetch", event => {
+            if (event.request.method !== "GET") return;
+
+            event.respondWith(
+              caches.match(event.request)
+                .then(response => response || fetch(event.request))
+            );
+          });
+          EOF
+
+          fi
+
+      - name: رفع ملفات الموقع
+        uses: actions/upload-artifact@v4
+        with:
+          name: website
+          path: dist
+
+
+  deploy:
+    name: 🌐 نشر الموقع على GitHub Pages
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+
+      - name: تحميل الموقع
+        uses: actions/download-artifact@v4
+        with:
+          name: website
+          path: dist
+
+      - name: تجهيز GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: رفع ملفات Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+      - name: نشر الموقع
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+
   apk:
     name: 📱 بناء APK
     needs: deploy
     runs-on: ubuntu-latest
 
     steps:
-      - name: تثبيت Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
 
-      - name: تثبيت Java
+      - name: تثبيت Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
+
+      - name: تثبيت Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
       - name: تثبيت Bubblewrap
-        run: npm install -g @bubblewrap/cli
+        run: |
+          npm install -g @bubblewrap/cli
 
-      - name: إنشاء رابط الموقع
+      - name: تحديد رابط اللعبة
         id: site
         run: |
           OWNER="${GITHUB_REPOSITORY_OWNER}"
@@ -29,6 +197,7 @@
       - name: إنشاء مشروع Android
         run: |
           mkdir -p twa
+
           cd twa
 
           bubblewrap init \
@@ -36,36 +205,20 @@
             --directory="." \
             --yes
 
-      - name: تجهيز Android SDK
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
-
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
-
-      - name: فحص Bubblewrap
-        working-directory: twa
-        run: bubblewrap doctor
-
-      - name: بناء APK بدون توقيع تفاعلي
+      - name: بناء APK
         working-directory: twa
         run: |
-          bubblewrap build \
-            --skipPwaValidation \
-            --skipSigning
+          bubblewrap build --skipPwaValidation
 
-      - name: البحث عن APK
-        working-directory: twa
+      - name: العثور على APK
         run: |
-          find . -name "*.apk" -type f -print
+          echo "📱 APK files:"
+          find twa -type f -name "*.apk" -print
 
       - name: رفع APK
         uses: actions/upload-artifact@v4
         with:
           name: حطّمها-APK
           path: |
-            twa/app-release-unsigned-aligned.apk
-            twa/app/build/outputs/apk/release/*.apk
+            twa/**/*.apk
           if-no-files-found: error
